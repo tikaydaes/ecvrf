@@ -1,5 +1,5 @@
-module github.com/atikayda/ecvrf
+module github.com/tikaydaes/ecvrf
 
-go 1.26.1
+go 1.24
 
-require github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
+require filippo.io/edwards25519 v1.1.0

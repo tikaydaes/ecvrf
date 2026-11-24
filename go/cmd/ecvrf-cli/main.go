@@ -1,109 +1,49 @@
-// CLI wrapper for cross-implementation validation.
-// Usage:
-//
-//	ecvrf-cli prove <sk_hex> <alpha_hex>
-//	ecvrf-cli verify <pk_hex> <pi_hex> <alpha_hex>
 package main
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/atikayda/ecvrf"
+	ecvrf "github.com/tikaydaes/ecvrf"
 )
-
-func readAlpha(args []string, idx int) (string, error) {
-	if args[idx] == "--alpha-file" {
-		data, err := os.ReadFile(args[idx+1])
-		if err != nil {
-			return "", fmt.Errorf("reading alpha file: %w", err)
-		}
-		return strings.TrimSpace(string(data)), nil
-	}
-	return args[idx], nil
-}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ecvrf-cli prove|verify ...")
-		os.Exit(1)
+		fmt.Fprintln(os.Stderr, "usage: ecvrf-cli prove <sk_hex> <alpha_hex> | verify <pk_hex> <pi_hex> <alpha_hex> | derive-pk <sk_hex>")
+		os.Exit(2)
 	}
-
+	mustHex := func(s string) []byte {
+		b, err := hex.DecodeString(s)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		return b
+	}
 	switch os.Args[1] {
 	case "prove":
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "usage: ecvrf-cli prove <sk_hex> <alpha_hex|--alpha-file path>")
-			os.Exit(1)
-		}
-		sk, err := hex.DecodeString(os.Args[2])
+		pi, err := ecvrf.Prove(mustHex(os.Args[2]), mustHex(os.Args[3]))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid sk hex: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		alphaHex, err := readAlpha(os.Args, 3)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
-		}
-		alpha, err := hex.DecodeString(alphaHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid alpha hex: %v\n", err)
-			os.Exit(1)
-		}
-		pi, err := ecvrf.Prove(sk, alpha)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "prove failed: %v\n", err)
-			os.Exit(1)
-		}
-		beta, err := ecvrf.ProofToHash(pi)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "proof_to_hash failed: %v\n", err)
-			os.Exit(1)
-		}
-		out, _ := json.Marshal(map[string]string{
-			"pi":   hex.EncodeToString(pi),
-			"beta": hex.EncodeToString(beta),
-		})
-		fmt.Println(string(out))
-
+		fmt.Println(hex.EncodeToString(pi))
 	case "verify":
-		if len(os.Args) < 5 {
-			fmt.Fprintln(os.Stderr, "usage: ecvrf-cli verify <pk_hex> <pi_hex> <alpha_hex|--alpha-file path>")
+		ok, beta := ecvrf.Verify(mustHex(os.Args[2]), mustHex(os.Args[3]), mustHex(os.Args[4]))
+		if !ok {
 			os.Exit(1)
 		}
-		pk, err := hex.DecodeString(os.Args[2])
+		fmt.Println(hex.EncodeToString(beta))
+	case "derive-pk":
+		pk, err := ecvrf.DerivePublicKey(mustHex(os.Args[2]))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid pk hex: %v\n", err)
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		pi, err := hex.DecodeString(os.Args[3])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid pi hex: %v\n", err)
-			os.Exit(1)
-		}
-		alphaHex, err := readAlpha(os.Args, 4)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
-		}
-		alpha, err := hex.DecodeString(alphaHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid alpha hex: %v\n", err)
-			os.Exit(1)
-		}
-		valid, beta := ecvrf.Verify(pk, pi, alpha)
-		result := map[string]interface{}{"valid": valid, "beta": nil}
-		if beta != nil {
-			result["beta"] = hex.EncodeToString(beta)
-		}
-		out, _ := json.Marshal(result)
-		fmt.Println(string(out))
-
+		fmt.Println(hex.EncodeToString(pk))
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
-		os.Exit(1)
+		os.Exit(2)
 	}
 }

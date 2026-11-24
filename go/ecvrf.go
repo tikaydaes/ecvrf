@@ -1,288 +1,250 @@
-// Package ecvrf implements ECVRF-SECP256K1-SHA256-TAI per RFC 9381.
+// Package ecvrf implements ECVRF-EDWARDS25519-SHA512-TAI per RFC 9381 Section 5.5
+// (suite byte 0x03).
+//
+// Proving is constant-time in the secret key and deterministic nonce using
+// filippo.io/edwards25519. Verification validates public keys against
+// small-order torsion points (RFC 9381 Section 5.6.1).
 package ecvrf
 
 import (
-	"crypto/sha256"
+	"crypto/sha512"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
-	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"filippo.io/edwards25519"
 )
 
 const (
-	suiteByte     byte = 0xFE
-	ProofLen           = 81
-	BetaLen            = 32
-	challengeLen       = 16
-	scalarLen          = 32
-	compressedLen      = 33
+	SuiteByte    byte = 0x03
+	SecretKeyLen      = 32
+	PublicKeyLen      = 32
+	ProofLen          = 80
+	BetaLen           = 64
+	challengeLen      = 16
+	scalarLen         = 32
+	pointLen          = 32
 )
 
 var (
-	ErrInvalidProofLen = errors.New("ecvrf: proof must be 81 bytes")
+	ErrInvalidProofLen = errors.New("ecvrf: proof must be 80 bytes")
 	ErrInvalidPoint    = errors.New("ecvrf: invalid curve point")
 	ErrEncodeToCurve   = errors.New("ecvrf: encode_to_curve failed after 256 iterations")
 	ErrInvalidSK       = errors.New("ecvrf: invalid secret key")
+	ErrInvalidPK       = errors.New("ecvrf: invalid or small-order public key")
 	ErrScalarOverflow  = errors.New("ecvrf: scalar >= group order")
 )
 
-func compressPoint(p *secp256k1.JacobianPoint) []byte {
-	pt := *p
-	pt.ToAffine()
-	pub := secp256k1.NewPublicKey(&pt.X, &pt.Y)
-	return pub.SerializeCompressed()
+func expandSecretKey(sk []byte) (*edwards25519.Scalar, []byte, error) {
+	if len(sk) != SecretKeyLen {
+		return nil, nil, fmt.Errorf("%w: must be %d bytes, got %d", ErrInvalidSK, SecretKeyLen, len(sk))
+	}
+	h := sha512.Sum512(sk)
+	x, err := edwards25519.NewScalar().SetBytesWithClamping(h[:32])
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrInvalidSK, err)
+	}
+	return x, h[32:], nil
 }
 
-// encodeToCurveTAI implements RFC 9381 Section 5.4.1.1 try_and_increment.
-// Returns (H point in Jacobian coords, counter that succeeded).
-func encodeToCurveTAI(pubKey *secp256k1.PublicKey, alpha []byte) (secp256k1.JacobianPoint, int, error) {
-	pkBytes := pubKey.SerializeCompressed()
+// ValidatePublicKey decodes pk as a canonical Edwards25519 point and rejects
+// small-order (torsion) public keys per RFC 9381 Section 5.6.1.
+func ValidatePublicKey(pk []byte) error {
+	_, err := validateKey(pk)
+	return err
+}
 
-	prefix := make([]byte, 0, 2+compressedLen)
-	prefix = append(prefix, suiteByte, 0x01)
-	prefix = append(prefix, pkBytes...)
+func validateKey(pk []byte) (*edwards25519.Point, error) {
+	if len(pk) != PublicKeyLen {
+		return nil, fmt.Errorf("%w: must be %d bytes, got %d", ErrInvalidPK, PublicKeyLen, len(pk))
+	}
+	y, err := new(edwards25519.Point).SetBytes(pk)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidPK, err)
+	}
+	cofactorY := new(edwards25519.Point).MultByCofactor(y)
+	if cofactorY.Equal(edwards25519.NewIdentityPoint()) == 1 {
+		return nil, ErrInvalidPK
+	}
+	return y, nil
+}
+
+// encodeToCurveTAI implements RFC 9381 Section 5.4.1.1 try_and_increment with
+// cofactor clearing (H = 8 * pt).
+func encodeToCurveTAI(pk, alpha []byte) (*edwards25519.Point, int, error) {
+	buf := make([]byte, 0, 2+len(pk)+len(alpha)+2)
+	buf = append(buf, SuiteByte, 0x01)
+	buf = append(buf, pk...)
+	buf = append(buf, alpha...)
+	buf = append(buf, 0x00, 0x00)
+	ctrIdx := len(buf) - 2
 
 	for ctr := 0; ctr <= 255; ctr++ {
-		hashInput := make([]byte, 0, len(prefix)+len(alpha)+2)
-		hashInput = append(hashInput, prefix...)
-		hashInput = append(hashInput, alpha...)
-		hashInput = append(hashInput, byte(ctr), 0x00)
-
-		hash := sha256.Sum256(hashInput)
-
-		// Attempt to decompress with 0x02 prefix (even y-coordinate)
-		compressed := make([]byte, compressedLen)
-		compressed[0] = 0x02
-		copy(compressed[1:], hash[:])
-
-		point, err := secp256k1.ParsePubKey(compressed)
+		buf[ctrIdx] = byte(ctr)
+		hash := sha512.Sum512(buf)
+		pt, err := new(edwards25519.Point).SetBytes(hash[:pointLen])
 		if err != nil {
 			continue
 		}
-
-		var result secp256k1.JacobianPoint
-		point.AsJacobian(&result)
-		return result, ctr, nil
+		h := new(edwards25519.Point).MultByCofactor(pt)
+		return h, ctr, nil
 	}
-
-	return secp256k1.JacobianPoint{}, 0, ErrEncodeToCurve
+	return nil, 0, ErrEncodeToCurve
 }
 
-// nonceGeneration implements RFC 9381 Section 5.4.2.1 via RFC 6979.
-// Input "message" is point_to_string(H), hashed with SHA-256 per the spec.
-func nonceGeneration(privKey *secp256k1.PrivateKey, h *secp256k1.JacobianPoint) secp256k1.ModNScalar {
-	hCompressed := compressPoint(h)
-	digest := sha256.Sum256(hCompressed)
-	skBytes := privKey.Key.Bytes()
-	k := secp256k1.NonceRFC6979(skBytes[:], digest[:], nil, nil, 0)
-	return *k
+// nonceGeneration implements RFC 9381 Section 5.4.2.2 (RFC 8032 style SHA-512).
+func nonceGeneration(prefix []byte, h *edwards25519.Point) (*edwards25519.Scalar, error) {
+	in := make([]byte, 0, len(prefix)+pointLen)
+	in = append(in, prefix...)
+	in = append(in, h.Bytes()...)
+	kString := sha512.Sum512(in)
+	return edwards25519.NewScalar().SetUniformBytes(kString[:])
 }
 
-// challengeGeneration implements RFC 9381 Section 5.4.3 with 5-point input (Y, H, Gamma, U, V).
-func challengeGeneration(y, h, gamma, u, v *secp256k1.JacobianPoint) secp256k1.ModNScalar {
-	hashInput := make([]byte, 0, 2+5*compressedLen+1)
-	hashInput = append(hashInput, suiteByte, 0x02)
-	hashInput = append(hashInput, compressPoint(y)...)
-	hashInput = append(hashInput, compressPoint(h)...)
-	hashInput = append(hashInput, compressPoint(gamma)...)
-	hashInput = append(hashInput, compressPoint(u)...)
-	hashInput = append(hashInput, compressPoint(v)...)
-	hashInput = append(hashInput, 0x00)
+// challengeGeneration implements RFC 9381 Section 5.4.3 over (Y, H, Gamma, U, V).
+func challengeGeneration(y, h, gamma, u, v *edwards25519.Point) (*edwards25519.Scalar, [challengeLen]byte, error) {
+	in := make([]byte, 0, 2+5*pointLen+1)
+	in = append(in, SuiteByte, 0x02)
+	in = append(in, y.Bytes()...)
+	in = append(in, h.Bytes()...)
+	in = append(in, gamma.Bytes()...)
+	in = append(in, u.Bytes()...)
+	in = append(in, v.Bytes()...)
+	in = append(in, 0x00)
 
-	cHash := sha256.Sum256(hashInput)
+	hash := sha512.Sum512(in)
+	var cShort [challengeLen]byte
+	copy(cShort[:], hash[:challengeLen])
 
-	// Truncate to first 16 bytes, zero-pad to 32 bytes for ModNScalar
-	var cBytes [32]byte
-	copy(cBytes[16:], cHash[:challengeLen])
-
-	var c secp256k1.ModNScalar
-	c.SetBytes(&cBytes)
-	return c
+	var cFull [scalarLen]byte
+	copy(cFull[:challengeLen], cShort[:])
+	c, err := edwards25519.NewScalar().SetCanonicalBytes(cFull[:])
+	return c, cShort, err
 }
 
-// proofToHash implements RFC 9381 Section 5.2.
-// secp256k1 cofactor is 1 so cofactor multiplication is identity.
-func proofToHash(gamma *secp256k1.JacobianPoint) [BetaLen]byte {
-	gammaBytes := compressPoint(gamma)
-
-	hashInput := make([]byte, 0, 2+compressedLen+1)
-	hashInput = append(hashInput, suiteByte, 0x03)
-	hashInput = append(hashInput, gammaBytes...)
-	hashInput = append(hashInput, 0x00)
-
-	return sha256.Sum256(hashInput)
+// proofToHash implements RFC 9381 Section 5.2 with cofactor multiplication (8 * Gamma).
+func proofToHash(gamma *edwards25519.Point) [BetaLen]byte {
+	cofactorGamma := new(edwards25519.Point).MultByCofactor(gamma)
+	in := make([]byte, 0, 2+pointLen+1)
+	in = append(in, SuiteByte, 0x03)
+	in = append(in, cofactorGamma.Bytes()...)
+	in = append(in, 0x00)
+	return sha512.Sum512(in)
 }
 
-func decodeProof(pi []byte) (secp256k1.JacobianPoint, secp256k1.ModNScalar, secp256k1.ModNScalar, error) {
+func decodeProof(pi []byte) (*edwards25519.Point, *edwards25519.Scalar, [challengeLen]byte, *edwards25519.Scalar, error) {
+	var cShort [challengeLen]byte
 	if len(pi) != ProofLen {
-		return secp256k1.JacobianPoint{}, secp256k1.ModNScalar{}, secp256k1.ModNScalar{},
-			fmt.Errorf("%w: got %d bytes", ErrInvalidProofLen, len(pi))
+		return nil, nil, cShort, nil, fmt.Errorf("%w: got %d bytes", ErrInvalidProofLen, len(pi))
 	}
-
-	gammaKey, err := secp256k1.ParsePubKey(pi[:compressedLen])
+	gamma, err := new(edwards25519.Point).SetBytes(pi[:pointLen])
 	if err != nil {
-		return secp256k1.JacobianPoint{}, secp256k1.ModNScalar{}, secp256k1.ModNScalar{},
-			fmt.Errorf("%w: gamma: %v", ErrInvalidPoint, err)
+		return nil, nil, cShort, nil, fmt.Errorf("%w: gamma: %v", ErrInvalidPoint, err)
 	}
-	var gamma secp256k1.JacobianPoint
-	gammaKey.AsJacobian(&gamma)
-
-	var cBytes [32]byte
-	copy(cBytes[16:], pi[compressedLen:compressedLen+challengeLen])
-	var c secp256k1.ModNScalar
-	c.SetBytes(&cBytes)
-
-	var sBytes [32]byte
-	copy(sBytes[:], pi[compressedLen+challengeLen:])
-	var s secp256k1.ModNScalar
-	overflow := s.SetBytes(&sBytes)
-	if overflow != 0 {
-		return secp256k1.JacobianPoint{}, secp256k1.ModNScalar{}, secp256k1.ModNScalar{}, ErrScalarOverflow
+	copy(cShort[:], pi[pointLen:pointLen+challengeLen])
+	var cFull [scalarLen]byte
+	copy(cFull[:challengeLen], cShort[:])
+	c, err := edwards25519.NewScalar().SetCanonicalBytes(cFull[:])
+	if err != nil {
+		return nil, nil, cShort, nil, err
 	}
-
-	return gamma, c, s, nil
+	s, err := edwards25519.NewScalar().SetCanonicalBytes(pi[pointLen+challengeLen:])
+	if err != nil {
+		return nil, nil, cShort, nil, ErrScalarOverflow
+	}
+	return gamma, c, cShort, s, nil
 }
 
-// Prove generates an 81-byte VRF proof: Gamma(33) || c(16) || s(32).
+// DerivePublicKey returns the 32-byte Ed25519 public key for a 32-byte seed sk.
+func DerivePublicKey(sk []byte) ([]byte, error) {
+	x, _, err := expandSecretKey(sk)
+	if err != nil {
+		return nil, err
+	}
+	y := new(edwards25519.Point).ScalarBaseMult(x)
+	return y.Bytes(), nil
+}
+
+// Prove generates an 80-byte VRF proof: Gamma(32) || c(16) || s(32).
 func Prove(sk, alpha []byte) ([]byte, error) {
-	if len(sk) != scalarLen {
-		return nil, fmt.Errorf("%w: must be %d bytes, got %d", ErrInvalidSK, scalarLen, len(sk))
+	x, prefix, err := expandSecretKey(sk)
+	if err != nil {
+		return nil, err
 	}
+	y := new(edwards25519.Point).ScalarBaseMult(x)
+	pk := y.Bytes()
 
-	// Validate sk is in range (0, n) before PrivKeyFromBytes silently wraps.
-	var skScalar secp256k1.ModNScalar
-	var skArr [32]byte
-	copy(skArr[:], sk)
-	overflow := skScalar.SetBytes(&skArr)
-	if overflow != 0 {
-		return nil, fmt.Errorf("%w: value >= group order", ErrInvalidSK)
-	}
-	if skScalar.IsZero() {
-		return nil, fmt.Errorf("%w: zero key", ErrInvalidSK)
-	}
-
-	privKey := secp256k1.PrivKeyFromBytes(sk)
-	pubKey := privKey.PubKey()
-
-	h, _, err := encodeToCurveTAI(pubKey, alpha)
+	h, _, err := encodeToCurveTAI(pk, alpha)
 	if err != nil {
 		return nil, err
 	}
 
-	// Gamma = x * H
-	var gamma secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&privKey.Key, &h, &gamma)
+	gamma := new(edwards25519.Point).ScalarMult(x, h)
+	k, err := nonceGeneration(prefix, h)
+	if err != nil {
+		return nil, err
+	}
 
-	k := nonceGeneration(privKey, &h)
+	u := new(edwards25519.Point).ScalarBaseMult(k)
+	v := new(edwards25519.Point).ScalarMult(k, h)
 
-	// U = k * G
-	var u secp256k1.JacobianPoint
-	secp256k1.ScalarBaseMultNonConst(&k, &u)
+	c, cShort, err := challengeGeneration(y, h, gamma, u, v)
+	if err != nil {
+		return nil, err
+	}
 
-	// V = k * H
-	var v secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&k, &h, &v)
-
-	var yJac secp256k1.JacobianPoint
-	pubKey.AsJacobian(&yJac)
-	c := challengeGeneration(&yJac, &h, &gamma, &u, &v)
-
-	// s = (k + c * x) mod n
-	var cx, s secp256k1.ModNScalar
-	cx.Mul2(&c, &privKey.Key)
-	s.Add2(&k, &cx)
-
-	gammaBytes := compressPoint(&gamma)
-	cAllBytes := c.Bytes()
-	sBytes := s.Bytes()
+	// s = (c * x + k) mod q
+	s := edwards25519.NewScalar().MultiplyAdd(c, x, k)
 
 	pi := make([]byte, 0, ProofLen)
-	pi = append(pi, gammaBytes...)
-	pi = append(pi, cAllBytes[16:]...)
-	pi = append(pi, sBytes[:]...)
-
+	pi = append(pi, gamma.Bytes()...)
+	pi = append(pi, cShort[:]...)
+	pi = append(pi, s.Bytes()...)
 	return pi, nil
 }
 
-// Verify checks a VRF proof and returns (valid, beta).
-// Beta is nil when the proof is invalid.
+// Verify checks an 80-byte VRF proof and returns (valid, beta).
+// Beta is 64 bytes when valid, nil otherwise.
 func Verify(pk, pi, alpha []byte) (bool, []byte) {
-	gamma, c, s, err := decodeProof(pi)
+	y, err := validateKey(pk)
+	if err != nil {
+		return false, nil
+	}
+	gamma, c, cShort, s, err := decodeProof(pi)
+	if err != nil {
+		return false, nil
+	}
+	h, _, err := encodeToCurveTAI(pk, alpha)
 	if err != nil {
 		return false, nil
 	}
 
-	pubKey, err := secp256k1.ParsePubKey(pk)
-	if err != nil {
-		return false, nil
-	}
-
-	h, _, err := encodeToCurveTAI(pubKey, alpha)
-	if err != nil {
-		return false, nil
-	}
-
-	var yJac secp256k1.JacobianPoint
-	pubKey.AsJacobian(&yJac)
-
-	// U = s*G - c*Y
-	var sG secp256k1.JacobianPoint
-	secp256k1.ScalarBaseMultNonConst(&s, &sG)
-
-	var negC secp256k1.ModNScalar
-	negC.NegateVal(&c)
-
-	var cY secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&negC, &yJac, &cY)
-
-	var u secp256k1.JacobianPoint
-	secp256k1.AddNonConst(&sG, &cY, &u)
-
+	negC := edwards25519.NewScalar().Negate(c)
+	// U = s*B - c*Y
+	u := new(edwards25519.Point).VarTimeDoubleScalarBaseMult(negC, y, s)
 	// V = s*H - c*Gamma
-	var sH secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&s, &h, &sH)
+	sH := new(edwards25519.Point).ScalarMult(s, h)
+	negCGamma := new(edwards25519.Point).ScalarMult(negC, gamma)
+	v := new(edwards25519.Point).Add(sH, negCGamma)
 
-	var cGamma secp256k1.JacobianPoint
-	secp256k1.ScalarMultNonConst(&negC, &gamma, &cGamma)
-
-	var v secp256k1.JacobianPoint
-	secp256k1.AddNonConst(&sH, &cGamma, &v)
-
-	cPrime := challengeGeneration(&yJac, &h, &gamma, &u, &v)
-
-	if c.Equals(&cPrime) {
-		beta := proofToHash(&gamma)
-		return true, beta[:]
+	_, cPrimeShort, err := challengeGeneration(y, h, gamma, u, v)
+	if err != nil {
+		return false, nil
 	}
-
-	return false, nil
+	if subtle.ConstantTimeCompare(cShort[:], cPrimeShort[:]) != 1 {
+		return false, nil
+	}
+	beta := proofToHash(gamma)
+	return true, beta[:]
 }
 
-// DerivePublicKey returns the compressed public key (33 bytes) for a secret key.
-func DerivePublicKey(sk []byte) ([]byte, error) {
-	if len(sk) != scalarLen {
-		return nil, fmt.Errorf("%w: must be %d bytes, got %d", ErrInvalidSK, scalarLen, len(sk))
-	}
-	var skScalar secp256k1.ModNScalar
-	var skArr [32]byte
-	copy(skArr[:], sk)
-	overflow := skScalar.SetBytes(&skArr)
-	if overflow != 0 {
-		return nil, fmt.Errorf("%w: value >= group order", ErrInvalidSK)
-	}
-	if skScalar.IsZero() {
-		return nil, fmt.Errorf("%w: zero key", ErrInvalidSK)
-	}
-	privKey := secp256k1.PrivKeyFromBytes(sk)
-	return privKey.PubKey().SerializeCompressed(), nil
-}
-
-// ProofToHash extracts the VRF output (beta, 32 bytes) from a proof.
+// ProofToHash extracts the 64-byte VRF output beta from an 80-byte proof
+// without verifying it.
 func ProofToHash(pi []byte) ([]byte, error) {
-	gamma, _, _, err := decodeProof(pi)
+	gamma, _, _, _, err := decodeProof(pi)
 	if err != nil {
 		return nil, err
 	}
-	beta := proofToHash(&gamma)
+	beta := proofToHash(gamma)
 	return beta[:], nil
 }

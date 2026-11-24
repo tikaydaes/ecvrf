@@ -35,11 +35,14 @@ func loadVectors(t *testing.T) vectorFile {
 	t.Helper()
 	data, err := os.ReadFile("../vectors/vectors.json")
 	if err != nil {
-		t.Fatalf("failed to read vectors.json: %v", err)
+		t.Fatalf("read vectors.json: %v", err)
 	}
 	var vf vectorFile
 	if err := json.Unmarshal(data, &vf); err != nil {
-		t.Fatalf("failed to parse vectors.json: %v", err)
+		t.Fatalf("parse vectors.json: %v", err)
+	}
+	if vf.Suite != "ECVRF-EDWARDS25519-SHA512-TAI" {
+		t.Fatalf("unexpected suite %q", vf.Suite)
 	}
 	return vf
 }
@@ -57,16 +60,11 @@ func TestProve(t *testing.T) {
 	vf := loadVectors(t)
 	for _, vec := range vf.Vectors {
 		t.Run(vec.Label, func(t *testing.T) {
-			sk := mustHex(t, vec.SK)
-			alpha := mustHex(t, vec.Alpha)
-
-			pi, err := Prove(sk, alpha)
+			pi, err := Prove(mustHex(t, vec.SK), mustHex(t, vec.Alpha))
 			if err != nil {
 				t.Fatalf("Prove: %v", err)
 			}
-
-			got := hex.EncodeToString(pi)
-			if got != vec.Pi {
+			if got := hex.EncodeToString(pi); got != vec.Pi {
 				t.Errorf("pi mismatch\n  got:  %s\n  want: %s", got, vec.Pi)
 			}
 		})
@@ -77,17 +75,11 @@ func TestVerify(t *testing.T) {
 	vf := loadVectors(t)
 	for _, vec := range vf.Vectors {
 		t.Run(vec.Label, func(t *testing.T) {
-			pk := mustHex(t, vec.PK)
-			alpha := mustHex(t, vec.Alpha)
-			pi := mustHex(t, vec.Pi)
-
-			valid, beta := Verify(pk, pi, alpha)
+			valid, beta := Verify(mustHex(t, vec.PK), mustHex(t, vec.Pi), mustHex(t, vec.Alpha))
 			if !valid {
-				t.Fatal("Verify returned invalid for valid proof")
+				t.Fatal("Verify rejected valid proof")
 			}
-
-			got := hex.EncodeToString(beta)
-			if got != vec.Beta {
+			if got := hex.EncodeToString(beta); got != vec.Beta {
 				t.Errorf("beta mismatch\n  got:  %s\n  want: %s", got, vec.Beta)
 			}
 		})
@@ -98,15 +90,11 @@ func TestProofToHash(t *testing.T) {
 	vf := loadVectors(t)
 	for _, vec := range vf.Vectors {
 		t.Run(vec.Label, func(t *testing.T) {
-			pi := mustHex(t, vec.Pi)
-
-			beta, err := ProofToHash(pi)
+			beta, err := ProofToHash(mustHex(t, vec.Pi))
 			if err != nil {
 				t.Fatalf("ProofToHash: %v", err)
 			}
-
-			got := hex.EncodeToString(beta)
-			if got != vec.Beta {
+			if got := hex.EncodeToString(beta); got != vec.Beta {
 				t.Errorf("beta mismatch\n  got:  %s\n  want: %s", got, vec.Beta)
 			}
 		})
@@ -117,13 +105,9 @@ func TestNegativeVerify(t *testing.T) {
 	vf := loadVectors(t)
 	for _, vec := range vf.NegativeVectors {
 		t.Run(vec.Description, func(t *testing.T) {
-			pk := mustHex(t, vec.PK)
-			alpha := mustHex(t, vec.Alpha)
-			pi := mustHex(t, vec.Pi)
-
-			valid, _ := Verify(pk, pi, alpha)
+			valid, _ := Verify(mustHex(t, vec.PK), mustHex(t, vec.Pi), mustHex(t, vec.Alpha))
 			if valid != vec.ExpectedVerify {
-				t.Errorf("expected verify=%v, got %v", vec.ExpectedVerify, valid)
+				t.Errorf("Verify = %v, want %v", valid, vec.ExpectedVerify)
 			}
 		})
 	}
@@ -133,99 +117,21 @@ func TestDerivePublicKey(t *testing.T) {
 	vf := loadVectors(t)
 	for _, vec := range vf.Vectors {
 		t.Run(vec.Label, func(t *testing.T) {
-			sk := mustHex(t, vec.SK)
-			pk, err := DerivePublicKey(sk)
+			pk, err := DerivePublicKey(mustHex(t, vec.SK))
 			if err != nil {
 				t.Fatalf("DerivePublicKey: %v", err)
 			}
-			got := hex.EncodeToString(pk)
-			if got != vec.PK {
+			if got := hex.EncodeToString(pk); got != vec.PK {
 				t.Errorf("pk mismatch\n  got:  %s\n  want: %s", got, vec.PK)
 			}
 		})
 	}
 }
 
-func TestProveRejectsInvalidSK(t *testing.T) {
-	// secp256k1 group order n
-	groupOrder, _ := hex.DecodeString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141")
-
-	tests := []struct {
-		name string
-		sk   []byte
-	}{
-		{"zero key", make([]byte, 32)},
-		{"sk = n (group order)", groupOrder},
-		{"sk = n+1", func() []byte {
-			n1 := make([]byte, 32)
-			copy(n1, groupOrder)
-			n1[31]++
-			return n1
-		}()},
-		{"too short", make([]byte, 31)},
-		{"too long", make([]byte, 33)},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Prove(tc.sk, []byte("test"))
-			if err == nil {
-				t.Error("expected error for invalid sk, got nil")
-			}
-		})
-	}
-}
-
-func TestProveDeterminism(t *testing.T) {
-	vf := loadVectors(t)
-	if len(vf.Vectors) == 0 {
-		t.Skip("no vectors")
-	}
-
-	vec := vf.Vectors[0]
-	sk := mustHex(t, vec.SK)
-	alpha := mustHex(t, vec.Alpha)
-
-	pi1, err := Prove(sk, alpha)
-	if err != nil {
-		t.Fatalf("Prove(1): %v", err)
-	}
-
-	pi2, err := Prove(sk, alpha)
-	if err != nil {
-		t.Fatalf("Prove(2): %v", err)
-	}
-
-	if hex.EncodeToString(pi1) != hex.EncodeToString(pi2) {
-		t.Error("non-deterministic: two Prove calls produced different proofs")
-	}
-}
-
-func TestRoundTrip(t *testing.T) {
-	vf := loadVectors(t)
-	for _, vec := range vf.Vectors {
-		t.Run(vec.Label, func(t *testing.T) {
-			sk := mustHex(t, vec.SK)
-			pk := mustHex(t, vec.PK)
-			alpha := mustHex(t, vec.Alpha)
-
-			pi, err := Prove(sk, alpha)
-			if err != nil {
-				t.Fatalf("Prove: %v", err)
-			}
-
-			valid, beta := Verify(pk, pi, alpha)
-			if !valid {
-				t.Fatal("round-trip: Verify rejected own proof")
-			}
-
-			betaFromHash, err := ProofToHash(pi)
-			if err != nil {
-				t.Fatalf("ProofToHash: %v", err)
-			}
-
-			if hex.EncodeToString(beta) != hex.EncodeToString(betaFromHash) {
-				t.Error("Verify beta != ProofToHash beta")
-			}
-		})
+func TestProveRejectsInvalidSKLen(t *testing.T) {
+	for _, n := range []int{0, 31, 33} {
+		if _, err := Prove(make([]byte, n), []byte("test")); err == nil {
+			t.Errorf("Prove accepted %d-byte sk", n)
+		}
 	}
 }
