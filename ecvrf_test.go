@@ -33,7 +33,7 @@ type negativeVector struct {
 
 func loadVectors(t *testing.T) vectorFile {
 	t.Helper()
-	data, err := os.ReadFile("../vectors/vectors.json")
+	data, err := os.ReadFile("vectors/vectors.json")
 	if err != nil {
 		t.Fatalf("read vectors.json: %v", err)
 	}

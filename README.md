@@ -6,7 +6,7 @@ Reference implementations of **ECVRF-EDWARDS25519-SHA512-TAI** (`suite_string = 
 
 | Language | Directory | Curve / Crypto | Constant-Time Proving |
 |---|---|---|---|
-| Go | `go/` | `filippo.io/edwards25519` + `crypto/sha512` (pure Go, no cgo) | Yes |
+| Go | `.` (module `github.com/tikaydaes/ecvrf`) | `filippo.io/edwards25519` + `crypto/sha512` (pure Go, no cgo) | Yes |
 | JavaScript | `js/` | Zero-dependency ESM (`BigInt` + Web Crypto `SHA-512`) | Verification only (public inputs) |
 | Dart | `dart/` | Pure Dart (`BigInt` + `package:crypto` `sha512`) | Verification only (public inputs) |
 | Python | `python/` | Pure Python 3 stdlib (`hashlib`) reference oracle | Reference / vector generator |

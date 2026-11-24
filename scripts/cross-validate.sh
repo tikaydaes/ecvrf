@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 mkdir -p scripts/.bin
-(cd go && go build -o ../scripts/.bin/ecvrf-go ./cmd/ecvrf-cli)
+go build -o scripts/.bin/ecvrf-go ./cmd/ecvrf-cli
 (cd dart && dart compile exe bin/ecvrf_cli.dart -o ../scripts/.bin/ecvrf-dart >/dev/null)
 
 python3 - <<'EOF'

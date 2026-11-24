@@ -6,7 +6,7 @@ test-python:
 	cd python && python3 ecvrf.py
 
 test-go:
-	cd go && go test -v -count=1 ./...
+	go test -v -count=1 ./...
 
 test-js:
 	cd js && node --test ecvrf.test.js
