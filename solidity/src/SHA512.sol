@@ -32,14 +32,68 @@ library SHA512 {
     }
 
     function _loadK(bytes memory kMem, uint256 i) private pure returns (uint64 val) {
-        assembly {
+        assembly ("memory-safe") {
             val := shr(192, mload(add(add(kMem, 32), shl(3, i))))
         }
     }
 
     function _loadWord(bytes memory padded, uint256 offset) private pure returns (uint64 val) {
-        assembly {
+        assembly ("memory-safe") {
             val := shr(192, mload(add(add(padded, 32), offset)))
+        }
+    }
+
+    function _compress(
+        uint64[8] memory h,
+        bytes memory padded,
+        uint256 blockOff,
+        bytes memory kMem,
+        uint64[80] memory w
+    ) private pure {
+        unchecked {
+            for (uint256 i = 0; i < 16; i++) {
+                w[i] = _loadWord(padded, blockOff + i * 8);
+            }
+            for (uint256 i = 16; i < 80; i++) {
+                uint64 w15 = w[i - 15];
+                uint64 w2 = w[i - 2];
+                uint64 s0 = _rotr(w15, 1) ^ _rotr(w15, 8) ^ (w15 >> 7);
+                uint64 s1 = _rotr(w2, 19) ^ _rotr(w2, 61) ^ (w2 >> 6);
+                w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+            }
+
+            uint64[8] memory v;
+            for (uint256 i = 0; i < 8; i++) {
+                v[i] = h[i];
+            }
+
+            for (uint256 i = 0; i < 80; i++) {
+                uint64 temp1;
+                uint64 temp2;
+                {
+                    uint64 s1 = _rotr(v[4], 14) ^ _rotr(v[4], 18) ^ _rotr(v[4], 41);
+                    uint64 ch = (v[4] & v[5]) ^ ((~v[4]) & v[6]);
+                    temp1 = v[7] + s1 + ch + _loadK(kMem, i) + w[i];
+                }
+                {
+                    uint64 s0 = _rotr(v[0], 28) ^ _rotr(v[0], 34) ^ _rotr(v[0], 39);
+                    uint64 maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                    temp2 = s0 + maj;
+                }
+
+                v[7] = v[6];
+                v[6] = v[5];
+                v[5] = v[4];
+                v[4] = v[3] + temp1;
+                v[3] = v[2];
+                v[2] = v[1];
+                v[1] = v[0];
+                v[0] = temp1 + temp2;
+            }
+
+            for (uint256 i = 0; i < 8; i++) {
+                h[i] += v[i];
+            }
         }
     }
 
@@ -75,50 +129,7 @@ library SHA512 {
 
         unchecked {
             for (uint256 blockOff = 0; blockOff < totalLen; blockOff += 128) {
-                for (uint256 i = 0; i < 16; i++) {
-                    w[i] = _loadWord(padded, blockOff + i * 8);
-                }
-                for (uint256 i = 16; i < 80; i++) {
-                    uint64 s0 = _rotr(w[i - 15], 1) ^ _rotr(w[i - 15], 8) ^ (w[i - 15] >> 7);
-                    uint64 s1 = _rotr(w[i - 2], 19) ^ _rotr(w[i - 2], 61) ^ (w[i - 2] >> 6);
-                    w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-                }
-
-                uint64 a = h[0];
-                uint64 b = h[1];
-                uint64 c = h[2];
-                uint64 d = h[3];
-                uint64 e = h[4];
-                uint64 f = h[5];
-                uint64 g = h[6];
-                uint64 hh = h[7];
-
-                for (uint256 i = 0; i < 80; i++) {
-                    uint64 s1 = _rotr(e, 14) ^ _rotr(e, 18) ^ _rotr(e, 41);
-                    uint64 ch = (e & f) ^ ((~e) & g);
-                    uint64 temp1 = hh + s1 + ch + _loadK(kMem, i) + w[i];
-                    uint64 s0 = _rotr(a, 28) ^ _rotr(a, 34) ^ _rotr(a, 39);
-                    uint64 maj = (a & b) ^ (a & c) ^ (b & c);
-                    uint64 temp2 = s0 + maj;
-
-                    hh = g;
-                    g = f;
-                    f = e;
-                    e = d + temp1;
-                    d = c;
-                    c = b;
-                    b = a;
-                    a = temp1 + temp2;
-                }
-
-                h[0] += a;
-                h[1] += b;
-                h[2] += c;
-                h[3] += d;
-                h[4] += e;
-                h[5] += f;
-                h[6] += g;
-                h[7] += hh;
+                _compress(h, padded, blockOff, kMem, w);
             }
         }
 
