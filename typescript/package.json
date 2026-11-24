@@ -1,0 +1,35 @@
+{
+  "name": "ecvrf-edwards25519-sha512-tai",
+  "version": "0.1.0",
+  "description": "RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI — Verifiable Random Function (TypeScript)",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/ecvrf.js",
+      "types": "./dist/ecvrf.d.ts"
+    }
+  },
+  "main": "./dist/ecvrf.js",
+  "types": "./dist/ecvrf.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test test/ecvrf.test.js",
+    "pretest": "tsc"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tikaydaes/ecvrf.git",
+    "directory": "typescript"
+  },
+  "keywords": ["vrf", "ecvrf", "edwards25519", "ed25519", "rfc9381", "cryptography"]
+}

@@ -30,6 +30,12 @@ jobs:
         with:
           go-version: stable
       - run: go vet ./... && go test -v -count=1 ./...
+      - run: go build -o ecvrf-go ./cmd/ecvrf-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-go
+          path: ecvrf-go
+          retention-days: 1
 
   js:
     name: JavaScript tests
@@ -42,6 +48,22 @@ jobs:
       - working-directory: js
         run: node --test ecvrf.test.js
 
+  typescript:
+    name: TypeScript tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - working-directory: typescript
+        run: npm ci && npm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-typescript
+          path: typescript/dist/
+          retention-days: 1
+
   dart:
     name: Dart tests
     runs-on: ubuntu-latest
@@ -52,24 +74,220 @@ jobs:
           sdk: stable
       - working-directory: dart
         run: dart pub get && dart analyze --fatal-infos && dart test
+      - working-directory: dart
+        run: dart compile exe bin/ecvrf_cli.dart -o ecvrf-dart
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-dart
+          path: dart/ecvrf-dart
+          retention-days: 1
 
-  cross-validate:
-    name: Cross-implementation validation
-    needs: [python, go, js, dart]
+  c:
+    name: C tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev
+      - working-directory: c
+        run: make all && make test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-c
+          path: c/ecvrf_cli
+          retention-days: 1
+
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - working-directory: rust
+        run: cargo test --release -- --nocapture
+      - working-directory: rust
+        run: cargo build --example cli --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-rust
+          path: rust/target/release/examples/cli
+          retention-days: 1
+
+  solana:
+    name: Solana tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: solana
+      - working-directory: solana
+        run: cargo test
+      - working-directory: solana
+        run: cargo build --example cli --features no-entrypoint --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-solana
+          path: solana/target/release/examples/cli
+          retention-days: 1
+
+  csharp:
+    name: C# tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - working-directory: csharp
+        run: dotnet test
+      - working-directory: csharp
+        run: dotnet publish Ecvrf.Cli -c Release -o out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-csharp
+          path: csharp/out/
+          retention-days: 1
+
+  kotlin:
+    name: Kotlin tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - working-directory: kotlin
+        run: ./gradlew test installDist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-kotlin
+          path: kotlin/build/install/ecvrf-kotlin/
+          retention-days: 1
+
+  haskell:
+    name: Haskell tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.8"
+          cabal-version: "3.12"
+      - working-directory: haskell
+        run: |
+          cabal update
+          cabal build all --enable-tests
+          cabal test --test-show-details=direct
+      - run: |
+          mkdir -p haskell-cli-out
+          cp "$(cd haskell && cabal list-bin ecvrf-cli)" haskell-cli-out/ecvrf-cli
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-haskell
+          path: haskell-cli-out/ecvrf-cli
+          retention-days: 1
+
+  zig:
+    name: Zig tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - working-directory: zig
+        run: zig build test && zig build -Doptimize=ReleaseFast
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-zig
+          path: zig/zig-out/bin/ecvrf-cli
+          retention-days: 1
+
+  swift:
+    name: Swift tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - working-directory: swift
+        run: swift build && swift run ecvrf-test
+
+  solidity:
+    name: Solidity tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+      - working-directory: solidity
+        run: |
+          git init
+          forge install foundry-rs/forge-std --no-git
+          forge test
+
+  cross-validate:
+    name: Cross-implementation validation
+    needs: [python, go, js, typescript, dart, c, rust, solana, csharp, kotlin, haskell, zig, swift, solidity]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-go
+          path: artifacts/go
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-typescript
+          path: typescript/dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-dart
+          path: artifacts/dart
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-c
+          path: artifacts/c
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-rust
+          path: artifacts/rust
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-solana
+          path: artifacts/solana
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-csharp
+          path: artifacts/csharp
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-kotlin
+          path: artifacts/kotlin
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-haskell
+          path: artifacts/haskell
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-zig
+          path: artifacts/zig
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - uses: dart-lang/setup-dart@v1
+      - uses: actions/setup-dotnet@v4
         with:
-          sdk: stable
-      - run: cd dart && dart pub get
-      - run: bash scripts/cross-validate.sh
+          dotnet-version: "10.0.x"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Run cross-validation
+        env:
+          ECVRF_BIN_DIR: ${{ github.workspace }}/artifacts
+        run: bash scripts/cross-validate.sh

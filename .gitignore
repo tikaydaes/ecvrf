@@ -25,7 +25,7 @@ venv/
 scripts/.bin/
 
 # Go
-/go/bin/
+/ecvrf-go
 
 # Rust
 /rust/target/
@@ -42,6 +42,7 @@ c/vectors_data.h
 c/*.o
 
 # C#
+csharp/out/
 csharp/**/bin/
 csharp/**/obj/
 
@@ -66,7 +67,11 @@ swift/Package.resolved
 solidity/out/
 solidity/cache/
 solidity/lib/
-solidity/.ecvrf-alpha
 
 # Solana
 solana/target/
+
+# Dart
+dart/.dart_tool/
+dart/pubspec.lock
+dart/ecvrf-dart

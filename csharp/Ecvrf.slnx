@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Ecvrf/Ecvrf.csproj" />
+  <Project Path="Ecvrf.Cli/Ecvrf.Cli.csproj" />
+  <Project Path="Ecvrf.Tests/Ecvrf.Tests.csproj" />
+</Solution>

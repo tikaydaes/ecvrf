@@ -1,0 +1,20 @@
+[package]
+name = "ecvrf"
+version = "0.1.0"
+edition = "2021"
+description = "RFC 9381 ECVRF-EDWARDS25519-SHA512-TAI implementation"
+license = "MIT"
+repository = "https://github.com/tikaydaes/ecvrf"
+homepage = "https://github.com/tikaydaes/ecvrf"
+keywords = ["vrf", "ecvrf", "edwards25519", "ed25519", "rfc9381", "cryptography"]
+categories = ["cryptography"]
+
+[dependencies]
+curve25519-dalek = { version = "4", default-features = false, features = ["precomputed-tables"] }
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
